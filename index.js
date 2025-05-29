@@ -1,0 +1,85 @@
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+
+app.get("/", (req, res) => {
+  res.send("✅ Roblox Proxy Server is Running!");
+});
+
+// 🔁 Helper to paginate through Roblox API responses
+async function getPaginatedResults(url) {
+  let cursor = null;
+  let results = [];
+
+  while (true) {
+    const response = await axios.get(url + (cursor ? `&cursor=${cursor}` : ""));
+    results.push(...response.data.data);
+
+    if (!response.data.nextPageCursor) break;
+    cursor = response.data.nextPageCursor;
+  }
+
+  return results;
+}
+
+// 🧢 Limiteds count (with pagination)
+app.get("/limiteds/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const assets = await getPaginatedResults(`https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=100`);
+    res.json({ count: assets.length });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch limiteds." });
+  }
+});
+
+// 🏆 Badges count (with pagination)
+app.get("/badges/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const badges = await getPaginatedResults(`https://badges.roblox.com/v1/users/${userId}/badges?limit=100`);
+    res.json({ count: badges.length });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch badges." });
+  }
+});
+
+// 👀 Visits (sum of all placeVisits fields)
+app.get("/visits/:userId", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    let totalVisits = 0;
+    let cursor = "";
+    let hasNextPage = true;
+
+    while (hasNextPage) {
+      const response = await axios.get(`https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=50&sortOrder=Asc&cursor=${cursor}`);
+      const data = response.data;
+
+      for (const game of data.data) {
+        totalVisits += game.placeVisits || 0;
+      }
+
+      if (data.nextPageCursor) {
+        cursor = data.nextPageCursor;
+      } else {
+        hasNextPage = false;
+      }
+    }
+
+    res.json({ total: totalVisits });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch visit count." });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
