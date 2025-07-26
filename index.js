@@ -107,6 +107,32 @@ app.get("/visits/:userId", async (req, res) => {
   }
 });
 
+// 📅 User info including join date
+app.get("/users/:userId", async (req, res) => {
+  const { userId } = req.params;
+  const url = `https://users.roblox.com/v1/users/${userId}`;
+
+  try {
+    const response = await axios.get(url);
+    const userData = response.data;
+    
+    // Extract join year from created date
+    const joinYear = userData.created ? parseInt(userData.created.substring(0, 4)) : null;
+    
+    res.json({
+      id: userData.id,
+      name: userData.name,
+      displayName: userData.displayName,
+      created: userData.created,
+      joinYear: joinYear,
+      isBanned: userData.isBanned
+    });
+  } catch (err) {
+    console.error("User Info Error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch user info." });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
