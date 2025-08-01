@@ -11,7 +11,7 @@ app.get("/", (req, res) => {
   res.send("✅ Roblox Proxy Server is Running!");
 });
 
-// 🔁 Helper to paginate through Roblox API responses
+// api response stuff
 async function getPaginatedResults(url) {
   let cursor = null;
   let results = [];
@@ -27,7 +27,48 @@ async function getPaginatedResults(url) {
   return results;
 }
 
-// 🧢 Limiteds count (with private check)
+// Get groups owned by user
+async function getOwnedGroups(userId) {
+  try {
+    const response = await axios.get(`https://groups.roblox.com/v1/users/${userId}/groups/roles`);
+    const ownedGroups = response.data.data.filter(group => group.role.rank === 255); // 255 is owner rank
+    return ownedGroups;
+  } catch (err) {
+    console.error("Error fetching owned groups:", err.message);
+    return [];
+  }
+}
+
+// Get games from a group
+async function getGroupGames(groupId) {
+  try {
+    let totalVisits = 0;
+    let cursor = "";
+    let hasNextPage = true;
+
+    while (hasNextPage) {
+      const response = await axios.get(`https://games.roblox.com/v2/groups/${groupId}/games?accessFilter=2&limit=100&cursor=${cursor}`);
+      const data = response.data;
+
+      for (const game of data.data) {
+        totalVisits += game.placeVisits || 0;
+      }
+
+      if (data.nextPageCursor) {
+        cursor = data.nextPageCursor;
+      } else {
+        hasNextPage = false;
+      }
+    }
+
+    return totalVisits;
+  } catch (err) {
+    console.error(`Error fetching games for group ${groupId}:`, err.message);
+    return 0;
+  }
+}
+
+// limited count check
 app.get("/limiteds/:userId", async (req, res) => {
   const { userId } = req.params;
   const url = `https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=100`;
@@ -48,19 +89,19 @@ app.get("/limiteds/:userId", async (req, res) => {
   }
 });
 
-// 🏆 Badges count (with improved private check)
+// badge count check
 app.get("/badges/:userId", async (req, res) => {
   const { userId } = req.params;
   const url = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100`;
 
   try {
-    // Initial check to detect private badge inventory via empty response
+    // private inv?
     const preview = await axios.get(url);
     if (Array.isArray(preview.data.data) && preview.data.data.length === 0) {
       return res.json({ private: true });
     }
 
-    // If not private, paginate and count all badges
+    // if not private, get badges
     const badges = await getPaginatedResults(url);
     res.json({ count: badges.length });
   } catch (err) {
@@ -76,12 +117,14 @@ app.get("/badges/:userId", async (req, res) => {
   }
 });
 
-// 👀 Visits (sum of all placeVisits fields)
+// sum of all placevisits, including group games where user is owner
 app.get("/visits/:userId", async (req, res) => {
   const { userId } = req.params;
 
   try {
     let totalVisits = 0;
+    
+    // Get user's own games
     let cursor = "";
     let hasNextPage = true;
 
@@ -100,14 +143,26 @@ app.get("/visits/:userId", async (req, res) => {
       }
     }
 
-    res.json({ total: totalVisits });
+    // Get groups owned by user
+    const ownedGroups = await getOwnedGroups(userId);
+    
+    // Get games from owned groups
+    for (const group of ownedGroups) {
+      const groupVisits = await getGroupGames(group.group.id);
+      totalVisits += groupVisits;
+    }
+
+    res.json({ 
+      total: totalVisits,
+      ownedGroups: ownedGroups.length // Optional: include count of owned groups
+    });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(500).json({ error: "Failed to fetch visit count." });
   }
 });
 
-// 📅 User info including join date
+// getting join date thing
 app.get("/users/:userId", async (req, res) => {
   const { userId } = req.params;
   const url = `https://users.roblox.com/v1/users/${userId}`;
@@ -116,7 +171,7 @@ app.get("/users/:userId", async (req, res) => {
     const response = await axios.get(url);
     const userData = response.data;
     
-    // Extract join year from created date
+    // get join date
     const joinYear = userData.created ? parseInt(userData.created.substring(0, 4)) : null;
     
     res.json({
