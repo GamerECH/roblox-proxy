@@ -5,31 +5,45 @@ const axios = require("axios");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configure axios defaults for better reliability
-axios.defaults.timeout = 10000; // 10 second timeout
-
 app.use(cors());
 
 app.get("/", (req, res) => {
   res.send("✅ Roblox Proxy Server is Running!");
 });
 
-// api response stuff with error handling
-async function getPaginatedResults(url, maxPages = 50) {
-  let cursor = null;
+// Fixed pagination function
+async function getPaginatedResults(url) {
+  let cursor = "";
   let results = [];
   let pageCount = 0;
 
-  while (pageCount < maxPages) {
+  while (true) {
     try {
-      const response = await axios.get(url + (cursor ? `&cursor=${cursor}` : ""));
-      results.push(...response.data.data);
+      const fullUrl = url + (cursor ? `&cursor=${cursor}` : "");
+      console.log(`Fetching page ${pageCount + 1}: ${fullUrl}`);
+      
+      const response = await axios.get(fullUrl);
+      
+      if (response.data.data) {
+        results.push(...response.data.data);
+        console.log(`Page ${pageCount + 1}: Got ${response.data.data.length} items, total so far: ${results.length}`);
+      }
 
-      if (!response.data.nextPageCursor) break;
+      if (!response.data.nextPageCursor) {
+        console.log("No more pages");
+        break;
+      }
+      
       cursor = response.data.nextPageCursor;
       pageCount++;
+      
+      // Safety limit
+      if (pageCount > 100) {
+        console.log("Hit page limit");
+        break;
+      }
     } catch (err) {
-      console.error(`Error fetching page ${pageCount + 1}:`, err.message);
+      console.error(`Error on page ${pageCount + 1}:`, err.message);
       throw err;
     }
   }
@@ -37,7 +51,7 @@ async function getPaginatedResults(url, maxPages = 50) {
   return results;
 }
 
-// limited count check with UGC support
+// Limited count with UGC support
 app.get("/limiteds/:userId", async (req, res) => {
   const { userId } = req.params;
   
@@ -68,50 +82,61 @@ app.get("/limiteds/:userId", async (req, res) => {
       throw err;
     }
     
-    // 2. Get UGC limiteds (optional - only if you need this)
-    // Limiting to just a few asset types for better performance
-    const assetTypes = [8, 41, 42]; // Hat, Hair, Face only
+    // 2. Get UGC limiteds - check all accessory types
+    const assetTypes = [8, 41, 42, 43, 44, 45, 46, 47]; // Hat, Hair, Face, Neck, Shoulder, Front, Back, Waist
     
     for (const assetType of assetTypes) {
-      const invUrl = `https://inventory.roblox.com/v2/users/${userId}/inventory/${assetType}?limit=100`;
+      console.log(`Checking asset type ${assetType}...`);
       
       try {
-        let invCursor = null;
-        let pageCount = 0;
-        const maxPagesPerType = 10; // Limit pages per asset type
+        let invCursor = "";
+        let typePageCount = 0;
         
-        while (pageCount < maxPagesPerType) {
-          const invResponse = await axios.get(invUrl + (invCursor ? `&cursor=${invCursor}` : ""), {
-            timeout: 5000 // 5 second timeout per request
+        while (true) {
+          const invUrl = `https://inventory.roblox.com/v2/users/${userId}/inventory/${assetType}?limit=100${invCursor ? `&cursor=${invCursor}` : ""}`;
+          
+          const invResponse = await axios.get(invUrl, {
+            timeout: 10000 // 10 second timeout
           });
           
-          // Filter for items that are limited and not already counted
-          const limitedItems = invResponse.data.data.filter(item => {
-            const isLimited = item.collectibleItemId || 
-                            item.collectibleProductId || 
-                            item.serialNumber || 
-                            (item.assetDetails && item.assetDetails.isLimited);
+          if (invResponse.data.data) {
+            // Filter for items that are limited and not already counted
+            const limitedItems = invResponse.data.data.filter(item => {
+              // Check multiple fields that indicate a limited item
+              const isLimited = item.collectibleItemId || 
+                              item.collectibleProductId || 
+                              item.serialNumber || 
+                              item.isLimited ||
+                              (item.collectibleItemDetails && item.collectibleItemDetails.collectibleItemId);
+              
+              if (isLimited && item.assetId && !seenAssetIds.has(item.assetId)) {
+                seenAssetIds.add(item.assetId);
+                return true;
+              }
+              return false;
+            });
             
-            if (isLimited && item.assetId && !seenAssetIds.has(item.assetId)) {
-              seenAssetIds.add(item.assetId);
-              return true;
+            ugcLimiteds += limitedItems.length;
+            
+            if (limitedItems.length > 0) {
+              console.log(`Found ${limitedItems.length} UGC limiteds in asset type ${assetType}`);
             }
-            return false;
-          });
-          
-          ugcLimiteds += limitedItems.length;
+          }
           
           if (!invResponse.data.nextPageCursor) break;
           invCursor = invResponse.data.nextPageCursor;
-          pageCount++;
+          typePageCount++;
+          
+          // Limit pages per type to avoid excessive requests
+          if (typePageCount > 20) break;
         }
       } catch (invErr) {
-        // Log but don't fail the entire request
         console.error(`Error fetching asset type ${assetType}:`, invErr.message);
         if (invErr.response && invErr.response.status === 403) {
-          break; // Stop checking other types if inventory is private
+          console.log("Inventory is private, stopping UGC check");
+          break;
         }
-        continue;
+        // Continue with next asset type
       }
     }
     
@@ -120,7 +145,11 @@ app.get("/limiteds/:userId", async (req, res) => {
     const totalLimiteds = regularLimiteds + ugcLimiteds;
     console.log(`Total limiteds for user ${userId}: ${totalLimiteds}`);
     
-    res.json({ count: totalLimiteds });
+    res.json({ 
+      count: totalLimiteds,
+      regular: regularLimiteds,
+      ugc: ugcLimiteds 
+    });
     
   } catch (err) {
     console.error("Limiteds Error:", err.response?.data || err.message);
@@ -128,21 +157,51 @@ app.get("/limiteds/:userId", async (req, res) => {
   }
 });
 
-// badge count check
+// Fixed badge count check
 app.get("/badges/:userId", async (req, res) => {
   const { userId } = req.params;
-  const url = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100`;
-
+  
   try {
-    // private inv?
-    const preview = await axios.get(url);
-    if (Array.isArray(preview.data.data) && preview.data.data.length === 0) {
+    let allBadges = [];
+    let cursor = "";
+    let pageCount = 0;
+    
+    // First check if inventory is private
+    const firstPageUrl = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100`;
+    const firstPage = await axios.get(firstPageUrl);
+    
+    if (Array.isArray(firstPage.data.data) && firstPage.data.data.length === 0 && !firstPage.data.nextPageCursor) {
       return res.json({ private: true });
     }
-
-    // if not private, get badges
-    const badges = await getPaginatedResults(url);
-    res.json({ count: badges.length });
+    
+    // Add first page results
+    allBadges.push(...firstPage.data.data);
+    cursor = firstPage.data.nextPageCursor;
+    
+    // Get remaining pages
+    while (cursor) {
+      const url = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100&cursor=${cursor}`;
+      console.log(`Fetching badge page ${pageCount + 2}`);
+      
+      const response = await axios.get(url);
+      
+      if (response.data.data) {
+        allBadges.push(...response.data.data);
+      }
+      
+      cursor = response.data.nextPageCursor;
+      pageCount++;
+      
+      // Safety limit
+      if (pageCount > 500) {
+        console.log("Hit badge page limit");
+        break;
+      }
+    }
+    
+    console.log(`Total badges for user ${userId}: ${allBadges.length}`);
+    res.json({ count: allBadges.length });
+    
   } catch (err) {
     if (
       err.response &&
@@ -165,9 +224,8 @@ app.get("/visits/:userId", async (req, res) => {
     let cursor = "";
     let hasNextPage = true;
     let pageCount = 0;
-    const maxPages = 20; // Limit to prevent infinite loops
 
-    while (hasNextPage && pageCount < maxPages) {
+    while (hasNextPage) {
       const response = await axios.get(`https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=50&sortOrder=Asc&cursor=${cursor}`);
       const data = response.data;
 
@@ -181,8 +239,12 @@ app.get("/visits/:userId", async (req, res) => {
       } else {
         hasNextPage = false;
       }
+      
+      // Safety limit
+      if (pageCount > 50) break;
     }
 
+    console.log(`Total visits for user ${userId}: ${totalVisits}`);
     res.json({ total: totalVisits });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -219,4 +281,5 @@ app.get("/users/:userId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
 
