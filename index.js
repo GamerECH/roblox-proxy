@@ -5,36 +5,46 @@ const axios = require("axios");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Configure axios defaults for better reliability
+axios.defaults.timeout = 10000; // 10 second timeout
+
 app.use(cors());
 
 app.get("/", (req, res) => {
   res.send("✅ Roblox Proxy Server is Running!");
 });
 
-// api response stuff
-async function getPaginatedResults(url) {
+// api response stuff with error handling
+async function getPaginatedResults(url, maxPages = 50) {
   let cursor = null;
   let results = [];
+  let pageCount = 0;
 
-  while (true) {
-    const response = await axios.get(url + (cursor ? `&cursor=${cursor}` : ""));
-    results.push(...response.data.data);
+  while (pageCount < maxPages) {
+    try {
+      const response = await axios.get(url + (cursor ? `&cursor=${cursor}` : ""));
+      results.push(...response.data.data);
 
-    if (!response.data.nextPageCursor) break;
-    cursor = response.data.nextPageCursor;
+      if (!response.data.nextPageCursor) break;
+      cursor = response.data.nextPageCursor;
+      pageCount++;
+    } catch (err) {
+      console.error(`Error fetching page ${pageCount + 1}:`, err.message);
+      throw err;
+    }
   }
 
   return results;
 }
 
-// limited count check (including UGC limiteds)
+// limited count check with UGC support
 app.get("/limiteds/:userId", async (req, res) => {
   const { userId } = req.params;
   
   try {
     let regularLimiteds = 0;
     let ugcLimiteds = 0;
-    const seenAssetIds = new Set(); // To avoid counting duplicates
+    const seenAssetIds = new Set();
     
     // 1. Get regular limiteds (collectibles)
     const collectiblesUrl = `https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=100`;
@@ -58,27 +68,30 @@ app.get("/limiteds/:userId", async (req, res) => {
       throw err;
     }
     
-    // 2. Get UGC limiteds
-    // Try using the inventory API for different asset types
-    const assetTypes = [8, 41, 42, 43, 44, 45, 46, 47]; // Hat, Hair, Face, Neck, Shoulder, Front, Back, Waist
+    // 2. Get UGC limiteds (optional - only if you need this)
+    // Limiting to just a few asset types for better performance
+    const assetTypes = [8, 41, 42]; // Hat, Hair, Face only
     
     for (const assetType of assetTypes) {
       const invUrl = `https://inventory.roblox.com/v2/users/${userId}/inventory/${assetType}?limit=100`;
       
       try {
         let invCursor = null;
+        let pageCount = 0;
+        const maxPagesPerType = 10; // Limit pages per asset type
         
-        while (true) {
-          const invResponse = await axios.get(invUrl + (invCursor ? `&cursor=${invCursor}` : ""));
+        while (pageCount < maxPagesPerType) {
+          const invResponse = await axios.get(invUrl + (invCursor ? `&cursor=${invCursor}` : ""), {
+            timeout: 5000 // 5 second timeout per request
+          });
           
           // Filter for items that are limited and not already counted
           const limitedItems = invResponse.data.data.filter(item => {
-            const isLimited = item.collectibleItemId || // Has a collectible ID
-                            item.collectibleProductId || // Has a collectible product ID
-                            item.serialNumber || // Has a serial number
-                            (item.assetDetails && item.assetDetails.isLimited); // Marked as limited
+            const isLimited = item.collectibleItemId || 
+                            item.collectibleProductId || 
+                            item.serialNumber || 
+                            (item.assetDetails && item.assetDetails.isLimited);
             
-            // Only count if it's limited and we haven't seen this asset ID before
             if (isLimited && item.assetId && !seenAssetIds.has(item.assetId)) {
               seenAssetIds.add(item.assetId);
               return true;
@@ -90,12 +103,13 @@ app.get("/limiteds/:userId", async (req, res) => {
           
           if (!invResponse.data.nextPageCursor) break;
           invCursor = invResponse.data.nextPageCursor;
+          pageCount++;
         }
       } catch (invErr) {
-        // Continue with other asset types if one fails
+        // Log but don't fail the entire request
+        console.error(`Error fetching asset type ${assetType}:`, invErr.message);
         if (invErr.response && invErr.response.status === 403) {
-          // If we get a 403 on any inventory check, skip the rest
-          break;
+          break; // Stop checking other types if inventory is private
         }
         continue;
       }
@@ -103,7 +117,6 @@ app.get("/limiteds/:userId", async (req, res) => {
     
     console.log(`UGC limiteds for user ${userId}: ${ugcLimiteds}`);
     
-    // Add up both types of limiteds
     const totalLimiteds = regularLimiteds + ugcLimiteds;
     console.log(`Total limiteds for user ${userId}: ${totalLimiteds}`);
     
@@ -143,7 +156,7 @@ app.get("/badges/:userId", async (req, res) => {
   }
 });
 
-// sum of all placevisits, add the like group one
+// sum of all placevisits
 app.get("/visits/:userId", async (req, res) => {
   const { userId } = req.params;
 
@@ -151,8 +164,10 @@ app.get("/visits/:userId", async (req, res) => {
     let totalVisits = 0;
     let cursor = "";
     let hasNextPage = true;
+    let pageCount = 0;
+    const maxPages = 20; // Limit to prevent infinite loops
 
-    while (hasNextPage) {
+    while (hasNextPage && pageCount < maxPages) {
       const response = await axios.get(`https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=50&sortOrder=Asc&cursor=${cursor}`);
       const data = response.data;
 
@@ -162,6 +177,7 @@ app.get("/visits/:userId", async (req, res) => {
 
       if (data.nextPageCursor) {
         cursor = data.nextPageCursor;
+        pageCount++;
       } else {
         hasNextPage = false;
       }
@@ -203,3 +219,4 @@ app.get("/users/:userId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
