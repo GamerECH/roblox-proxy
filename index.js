@@ -203,66 +203,111 @@ app.get("/playing/:userId", async (req, res) => {
     
     const userPresence = presenceResponse.data.userPresences[0];
     
-    // Check if user is in a game
-    if (!userPresence || userPresence.userPresenceType !== 2) {
-      return res.json({ 
-        playing: false,
-        message: "Not playing game" 
-      });
-    }
-    
-    // If they're in a game, get the game details
-    const placeId = userPresence.placeId;
-    const gameId = userPresence.gameId; // This is the universe ID
-    const lastLocation = userPresence.lastLocation;
-    
-    if (!gameId) {
-      return res.json({ 
-        playing: false,
-        message: "Not playing game" 
-      });
-    }
-    
-    // Get game details
-    const gameResponse = await axios.get(
-      `https://games.roblox.com/v1/games?universeIds=${gameId}`
+// Get current game user is playing with server info
+app.get("/playing/:userId", async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    // First, get user presence to check if they're online and in a game
+    const presenceResponse = await axios.post(
+      "https://presence.roblox.com/v1/presence/users",
+      {
+        userIds: [parseInt(userId)]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
+      }
     );
     
-    const gameData = gameResponse.data.data[0];
+    const userPresence = presenceResponse.data.userPresences[0];
     
-    // Try to get server/job ID (only works if joins are public or you're friends)
-    let serverInfo = {
-      jobId: null,
-      joinable: false,
-      message: "Server info not available (private joins or not friends)"
-    };
+    // Log for debugging
+    console.log(`Presence data for ${userId}:`, userPresence);
     
-    // The presence API sometimes includes rootPlaceId and placeId which can help identify the server
-    if (userPresence.rootPlaceId && userPresence.placeId) {
-      serverInfo.rootPlaceId = userPresence.rootPlaceId;
-      serverInfo.placeId = userPresence.placeId;
-      
-      // If lastLocation exists, it might contain server info
-      if (lastLocation) {
-        serverInfo.lastLocation = lastLocation;
+    // Check if user is in a game (type 2) or in studio (type 3)
+    if (!userPresence || (userPresence.userPresenceType !== 2 && userPresence.userPresenceType !== 3)) {
+      return res.json({ 
+        playing: false,
+        message: "Not playing game",
+        presenceType: userPresence?.userPresenceType || 0,
+        presenceData: userPresence // Include raw data for debugging
+      });
+    }
+    
+    // Get various IDs - Roblox uses different fields sometimes
+    const placeId = userPresence.placeId || userPresence.rootPlaceId;
+    const gameId = userPresence.gameId || userPresence.universeId;
+    const lastLocation = userPresence.lastLocation;
+    
+    if (!gameId && !placeId) {
+      return res.json({ 
+        playing: false,
+        message: "Game ID not available",
+        presenceData: userPresence
+      });
+    }
+    
+    // If we have a gameId, get game details
+    let gameData = null;
+    if (gameId) {
+      try {
+        const gameResponse = await axios.get(
+          `https://games.roblox.com/v1/games?universeIds=${gameId}`
+        );
+        gameData = gameResponse.data.data[0];
+      } catch (err) {
+        console.log("Failed to get game details:", err.message);
       }
     }
     
+    // If we couldn't get game data from universe ID, try place ID
+    if (!gameData && placeId) {
+      try {
+        const placeResponse = await axios.get(
+          `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`
+        );
+        if (placeResponse.data && placeResponse.data.length > 0) {
+          const placeData = placeResponse.data[0];
+          gameData = {
+            name: placeData.name,
+            description: placeData.description,
+            creator: placeData.builder,
+            playing: placeData.playerCount
+          };
+        }
+      } catch (err) {
+        console.log("Failed to get place details:", err.message);
+      }
+    }
+    
+    // Build server info
+    let serverInfo = {
+      jobId: userPresence.gameInstanceId || null,
+      lastLocation: lastLocation || "Unknown",
+      placeId: placeId,
+      rootPlaceId: userPresence.rootPlaceId || null
+    };
+    
     res.json({
       playing: true,
-      gameId: gameId,
-      placeId: placeId,
-      gameName: gameData.name,
-      gameDescription: gameData.description,
-      creator: gameData.creator,
-      price: gameData.price,
-      playing: gameData.playing,
-      server: serverInfo
+      gameId: gameId || null,
+      placeId: placeId || null,
+      gameName: gameData?.name || "Unknown Game",
+      gameDescription: gameData?.description || null,
+      creator: gameData?.creator || null,
+      price: gameData?.price || null,
+      playingCount: gameData?.playing || null,
+      server: serverInfo,
+      presenceType: userPresence.userPresenceType,
+      isInStudio: userPresence.userPresenceType === 3
     });
     
   } catch (err) {
     console.error("Playing Status Error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch playing status." });
+    res.status(500).json({ error: "Failed to fetch playing status.", details: err.response?.data });
   }
 });
 
@@ -290,3 +335,4 @@ app.get("/canjoin/:userId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
