@@ -226,7 +226,7 @@ app.get("/debug/presence/:userId", async (req, res) => {
   }
 });
 
-// Enhanced playing endpoint with better error handling
+// Enhanced playing endpoint with better subplace/VC server support
 app.get("/playing/:userId", async (req, res) => {
   const { userId } = req.params;
   
@@ -264,21 +264,26 @@ app.get("/playing/:userId", async (req, res) => {
       });
     }
     
-    // Get various IDs - Roblox uses different fields sometimes
-    const placeId = userPresence.placeId || userPresence.rootPlaceId;
+    // Get various IDs
+    const placeId = userPresence.placeId;
+    const rootPlaceId = userPresence.rootPlaceId;
     const gameId = userPresence.gameId || userPresence.universeId;
     const lastLocation = userPresence.lastLocation;
+    const gameInstanceId = userPresence.gameInstanceId;
     
-    if (!gameId && !placeId) {
+    // Check if user is in a subplace (like VC server)
+    const isInSubplace = placeId && rootPlaceId && placeId !== rootPlaceId;
+    
+    if (!gameId && !placeId && !rootPlaceId) {
       return res.json({ 
-        playing: true, // They're in a game but we can't get details
+        playing: true,
         message: "In game but details unavailable",
         presenceType: userPresence.userPresenceType,
         debug: userPresence
       });
     }
     
-    // If we have a gameId, get game details
+    // Get game details from universe ID
     let gameData = null;
     if (gameId) {
       try {
@@ -291,72 +296,406 @@ app.get("/playing/:userId", async (req, res) => {
       }
     }
     
-    // If we couldn't get game data from universe ID, try place ID
-    if (!gameData && placeId) {
+    // Get details about the specific place (including subplaces)
+    let currentPlaceData = null;
+    let rootPlaceData = null;
+    
+    if (placeId) {
       try {
         const placeResponse = await axios.get(
           `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`
         );
         if (placeResponse.data && placeResponse.data.length > 0) {
-          const placeData = placeResponse.data[0];
-          gameData = {
-            name: placeData.name,
-            description: placeData.description,
-            creator: placeData.builder,
-            playing: placeData.playerCount
-          };
+          currentPlaceData = placeResponse.data[0];
         }
       } catch (err) {
-        console.log("Failed to get place details:", err.message);
+        console.log("Failed to get current place details:", err.message);
       }
     }
     
-    // Build server info
-    let serverInfo = {
-      jobId: userPresence.gameInstanceId || null,
-      lastLocation: lastLocation || "Unknown",
-      placeId: placeId,
-      rootPlaceId: userPresence.rootPlaceId || null
+    // If in a subplace, also get root place details
+    if (isInSubplace && rootPlaceId) {
+      try {
+        const rootPlaceResponse = await axios.get(
+          `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${rootPlaceId}`
+        );
+        if (rootPlaceResponse.data && rootPlaceResponse.data.length > 0) {
+          rootPlaceData = rootPlaceResponse.data[0];
+        }
+      } catch (err) {
+        console.log("Failed to get root place details:", err.message);
+      }
+    }
+    
+    // Try to get universe ID from place if we don't have game data
+    if (!gameData && (currentPlaceData || rootPlaceData)) {
+      const universeId = currentPlaceData?.universeId || rootPlaceData?.universeId;
+      if (universeId) {
+        try {
+          const gameResponse = await axios.get(
+            `https://games.roblox.com/v1/games?universeIds=${universeId}`
+          );
+          gameData = gameResponse.data.data[0];
+        } catch (err) {
+          console.log("Failed to get game from universe ID:", err.message);
+        }
+      }
+    }
+    
+    // Build join links
+    const joinLinks = {
+      directJoin: gameInstanceId ? `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}` : null,
+      placeLink: `https://www.roblox.com/games/${placeId}`,
+      deepLink: gameInstanceId ? `roblox://placeId=${placeId}&gameInstanceId=${gameInstanceId}` : null,
+      webJoin: gameInstanceId ? `https://www.roblox.com/home?placeId=${placeId}&gameInstanceId=${gameInstanceId}` : null
     };
     
-    res.json({
+    // Build comprehensive response
+    const response = {
       playing: true,
-      gameId: gameId || null,
-      placeId: placeId || null,
-      gameName: gameData?.name || "Unknown Game",
+      gameId: gameId || gameData?.id || null,
+      gameName: gameData?.name || rootPlaceData?.name || currentPlaceData?.name || "Unknown Game",
       gameDescription: gameData?.description || null,
       creator: gameData?.creator || null,
       price: gameData?.price || null,
       playingCount: gameData?.playing || null,
-      server: serverInfo,
       presenceType: userPresence.userPresenceType,
-      isInStudio: userPresence.userPresenceType === 3
-    });
+      isInStudio: userPresence.userPresenceType === 3,
+      
+      // Place information
+      place: {
+        currentPlaceId: placeId,
+        currentPlaceName: currentPlaceData?.name || lastLocation || "Unknown Place",
+        currentPlaceDescription: currentPlaceData?.description || null,
+        isSubplace: isInSubplace,
+        isVoiceEnabled: currentPlaceData?.isVoiceEnabled || false,
+        
+        // Root place info (main game place)
+        rootPlaceId: rootPlaceId,
+        rootPlaceName: rootPlaceData?.name || null,
+        rootPlaceDescription: rootPlaceData?.description || null,
+      },
+      
+      // Server information
+      server: {
+        jobId: gameInstanceId || null,
+        lastLocation: lastLocation || "Unknown",
+        playerCount: currentPlaceData?.playerCount || null,
+        maxPlayers: currentPlaceData?.maxPlayerCount || null,
+      },
+      
+      // Join information
+      joinInfo: {
+        canJoin: !!gameInstanceId,
+        joinLinks: joinLinks,
+        instructions: gameInstanceId ? 
+          "Use the directJoin link to join this exact server/subplace. The deepLink works on mobile." : 
+          "Cannot join specific server - no gameInstanceId available"
+      },
+      
+      // Additional metadata
+      metadata: {
+        isPrivateServer: userPresence.privateServerId ? true : false,
+        privateServerId: userPresence.privateServerId || null,
+        lastOnline: userPresence.lastOnline,
+      }
+    };
+    
+    // Add subplace-specific info if available
+    if (isInSubplace) {
+      response.subplaceInfo = {
+        message: "User is in a subplace (possibly VC server or special area)",
+        mainGamePlaceId: rootPlaceId,
+        subplacePlaceId: placeId,
+        possibleVCServer: currentPlaceData?.isVoiceEnabled || lastLocation?.toLowerCase().includes('voice') || false,
+        directSubplaceJoin: gameInstanceId ? 
+          `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}` : 
+          "Cannot join - no instance ID"
+      };
+    }
+    
+    res.json(response);
     
   } catch (err) {
     console.error("Playing Status Error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch playing status.", details: err.response?.data });
+        res.status(500).json({ error: "Failed to fetch playing status.", details: err.response?.data });
   }
 });
 
-// Optional: Add endpoint to check if you can join a user's game
+// Get detailed place information including voice chat status
+app.get("/place/:placeId", async (req, res) => {
+  const { placeId } = req.params;
+  
+  try {
+    const placeResponse = await axios.get(
+      `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`
+    );
+    
+    if (placeResponse.data && placeResponse.data.length > 0) {
+      const placeData = placeResponse.data[0];
+      
+      // Try to get universe/game data
+      let gameData = null;
+      if (placeData.universeId) {
+        try {
+          const gameResponse = await axios.get(
+            `https://games.roblox.com/v1/games?universeIds=${placeData.universeId}`
+          );
+          gameData = gameResponse.data.data[0];
+        } catch (err) {
+          console.log("Failed to get game data:", err.message);
+        }
+      }
+      
+      res.json({
+        placeId: placeData.placeId,
+        name: placeData.name,
+        description: placeData.description,
+        sourceName: placeData.sourceName,
+        sourceDescription: placeData.sourceDescription,
+        url: placeData.url,
+        builder: placeData.builder,
+        builderId: placeData.builderId,
+        hasVerifiedBadge: placeData.hasVerifiedBadge,
+        isPlayable: placeData.isPlayable,
+        reasonProhibited: placeData.reasonProhibited,
+        universeId: placeData.universeId,
+        universeRootPlaceId: placeData.universeRootPlaceId,
+        price: placeData.price,
+        imageToken: placeData.imageToken,
+        isVoiceEnabled: placeData.isVoiceEnabled || false,
+        hasVoiceChat: placeData.hasVoiceChat || false,
+        gameData: gameData,
+        joinLinks: {
+          webLink: `https://www.roblox.com/games/${placeId}`,
+          directLink: `https://www.roblox.com/games/start?placeId=${placeId}`,
+          deepLink: `roblox://placeId=${placeId}`
+        }
+      });
+    } else {
+      res.status(404).json({ error: "Place not found" });
+    }
+    
+  } catch (err) {
+    console.error("Place Details Error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch place details." });
+  }
+});
+
+// Check if you can join a user's game and get join link
 app.get("/canjoin/:userId", async (req, res) => {
   const { userId } = req.params;
   
   try {
-    const response = await axios.get(
+    // First check if we can join
+    const canJoinResponse = await axios.get(
       `https://presence.roblox.com/v1/presence/users/${userId}/canJoin`
     );
     
+    if (!canJoinResponse.data.canJoin) {
+      return res.json({
+        canJoin: false,
+        reason: "User's joins are disabled or you cannot join them",
+        isOnline: canJoinResponse.data.isOnline
+      });
+    }
+    
+    // Get detailed presence for join info
+    const presenceResponse = await axios.post(
+      "https://presence.roblox.com/v1/presence/users",
+      {
+        userIds: [parseInt(userId)]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
+      }
+    );
+    
+    const userPresence = presenceResponse.data.userPresences[0];
+    
+    if (!userPresence || userPresence.userPresenceType !== 2) {
+      return res.json({
+        canJoin: false,
+        reason: "User is not in a game",
+        presence: userPresence
+      });
+    }
+    
+    const placeId = userPresence.placeId;
+    const gameInstanceId = userPresence.gameInstanceId;
+    const rootPlaceId = userPresence.rootPlaceId;
+    const isInSubplace = placeId && rootPlaceId && placeId !== rootPlaceId;
+    
     res.json({
-      canJoin: response.data.canJoin,
-      isOnline: response.data.isOnline,
-      presence: response.data.presence
+      canJoin: true,
+      isOnline: true,
+      gameInfo: {
+        placeId: placeId,
+        rootPlaceId: rootPlaceId,
+        gameInstanceId: gameInstanceId,
+        isInSubplace: isInSubplace,
+        lastLocation: userPresence.lastLocation
+      },
+      joinLinks: {
+        directJoin: gameInstanceId ? 
+          `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}` : 
+          `https://www.roblox.com/games/start?placeId=${placeId}`,
+        webJoin: gameInstanceId ? 
+          `https://www.roblox.com/home?placeId=${placeId}&gameInstanceId=${gameInstanceId}` : 
+          null,
+        deepLink: gameInstanceId ? 
+          `roblox://placeId=${placeId}&gameInstanceId=${gameInstanceId}` : 
+          `roblox://placeId=${placeId}`,
+        mobileDeepLink: gameInstanceId ?
+          `robloxmobile://placeId=${placeId}&gameInstanceId=${gameInstanceId}` :
+          `robloxmobile://placeId=${placeId}`
+      },
+      instructions: {
+        desktop: "Use 'directJoin' link in your browser while logged into Roblox",
+        mobile: "Use 'deepLink' or 'mobileDeepLink' on mobile devices with Roblox app installed",
+        note: isInSubplace ? 
+          "This will join the exact subplace/VC server the user is in" : 
+          "This will join the same game, but possibly a different server"
+      }
     });
     
   } catch (err) {
     console.error("Can Join Error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to check join status." });
+  }
+});
+
+// Get server/instance details for a specific game instance
+app.get("/server/:placeId/:gameInstanceId", async (req, res) => {
+  const { placeId, gameInstanceId } = req.params;
+  
+  try {
+    // Try to get server info (this endpoint might not always work)
+    const serverUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100`;
+    const serversResponse = await axios.get(serverUrl);
+    
+    // Look for the specific server
+    const targetServer = serversResponse.data.data.find(
+      server => server.id === gameInstanceId
+    );
+    
+    if (targetServer) {
+      res.json({
+        found: true,
+        server: {
+          id: targetServer.id,
+          maxPlayers: targetServer.maxPlayers,
+          playing: targetServer.playing,
+          playerTokens: targetServer.playerTokens,
+          fps: targetServer.fps,
+          ping: targetServer.ping
+        },
+        joinLink: `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}`
+      });
+    } else {
+      res.json({
+        found: false,
+        message: "Server not found in public servers list",
+        joinLink: `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}`,
+        note: "The server might be private, full, or a subplace server"
+      });
+    }
+    
+  } catch (err) {
+    console.error("Server Details Error:", err.response?.data || err.message);
+    res.json({
+      error: "Could not fetch server list",
+      joinLink: `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}`,
+      note: "You can still try joining with the provided link"
+    });
+  }
+});
+
+// Generate various join links for a user
+app.get("/joinlinks/:userId", async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    // Get user's current game
+    const presenceResponse = await axios.post(
+      "https://presence.roblox.com/v1/presence/users",
+      {
+        userIds: [parseInt(userId)]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
+      }
+    );
+    
+    const userPresence = presenceResponse.data.userPresences[0];
+    
+    if (!userPresence || userPresence.userPresenceType !== 2) {
+      return res.json({
+        error: "User is not in a game",
+        presence: userPresence?.userPresenceType
+      });
+    }
+    
+    const placeId = userPresence.placeId;
+    const gameInstanceId = userPresence.gameInstanceId;
+    const rootPlaceId = userPresence.rootPlaceId;
+    const isInSubplace = placeId && rootPlaceId && placeId !== rootPlaceId;
+    
+    // Generate all possible join links
+    const links = {
+      primary: {
+        web: gameInstanceId ? 
+          `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}` :
+          `https://www.roblox.com/games/${placeId}`,
+        description: "Main join link - works in browser"
+      },
+      alternative: {
+        home: gameInstanceId ? 
+          `https://www.roblox.com/home?placeId=${placeId}&gameInstanceId=${gameInstanceId}` : null,
+        games: `https://www.roblox.com/games/${placeId}`,
+        description: "Alternative web links"
+      },
+      deepLinks: {
+        standard: gameInstanceId ? 
+          `roblox://placeId=${placeId}&gameInstanceId=${gameInstanceId}` :
+          `roblox://placeId=${placeId}`,
+        mobile: gameInstanceId ?
+          `robloxmobile://placeId=${placeId}&gameInstanceId=${gameInstanceId}` :
+          `robloxmobile://placeId=${placeId}`,
+        description: "Deep links for Roblox app"
+      },
+      subplaceSpecific: isInSubplace ? {
+        note: "User is in a subplace/VC server",
+        mainPlace: `https://www.roblox.com/games/${rootPlaceId}`,
+        subplace: `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${gameInstanceId}`,
+        canDirectJoin: !!gameInstanceId
+      } : null
+    };
+    
+    res.json({
+      userId: userId,
+      placeId: placeId,
+      gameInstanceId: gameInstanceId,
+      isInSubplace: isInSubplace,
+      links: links,
+      usage: {
+        desktop: "Copy the 'primary.web' link and paste in your browser while logged in",
+        mobile: "Click the 'deepLinks.mobile' link on a device with Roblox installed",
+        note: gameInstanceId ? 
+          "These links will join the EXACT server/subplace" : 
+          "No specific server ID - will join a random server"
+      }
+    });
+    
+  } catch (err) {
+    console.error("Join Links Error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to generate join links" });
   }
 });
 
