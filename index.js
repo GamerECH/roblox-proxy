@@ -188,22 +188,45 @@ app.get("/users/:userId", async (req, res) => {
   }
 });
 
-// Get current game user is playing with server info
-app.get("/playing/:userId", async (req, res) => {
+// Add debug endpoint to see raw presence data
+app.get("/debug/presence/:userId", async (req, res) => {
   const { userId } = req.params;
   
   try {
-    // First, get user presence to check if they're online and in a game
     const presenceResponse = await axios.post(
       "https://presence.roblox.com/v1/presence/users",
       {
         userIds: [parseInt(userId)]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
       }
     );
     
-    const userPresence = presenceResponse.data.userPresences[0];
+    res.json({
+      raw: presenceResponse.data,
+      userPresence: presenceResponse.data.userPresences[0],
+      interpretation: {
+        userPresenceType: presenceResponse.data.userPresences[0]?.userPresenceType,
+        types: {
+          0: "Offline",
+          1: "Online (Website/Mobile)",
+          2: "In Game",
+          3: "In Studio"
+        }
+      }
+    });
     
-// Get current game user is playing with server info
+  } catch (err) {
+    console.error("Debug Error:", err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
+// Enhanced playing endpoint with better error handling
 app.get("/playing/:userId", async (req, res) => {
   const { userId } = req.params;
   
@@ -225,7 +248,7 @@ app.get("/playing/:userId", async (req, res) => {
     const userPresence = presenceResponse.data.userPresences[0];
     
     // Log for debugging
-    console.log(`Presence data for ${userId}:`, userPresence);
+    console.log(`Presence data for ${userId}:`, JSON.stringify(userPresence, null, 2));
     
     // Check if user is in a game (type 2) or in studio (type 3)
     if (!userPresence || (userPresence.userPresenceType !== 2 && userPresence.userPresenceType !== 3)) {
@@ -233,7 +256,11 @@ app.get("/playing/:userId", async (req, res) => {
         playing: false,
         message: "Not playing game",
         presenceType: userPresence?.userPresenceType || 0,
-        presenceData: userPresence // Include raw data for debugging
+        debug: {
+          userPresenceType: userPresence?.userPresenceType,
+          lastOnline: userPresence?.lastOnline,
+          lastLocation: userPresence?.lastLocation
+        }
       });
     }
     
@@ -244,9 +271,10 @@ app.get("/playing/:userId", async (req, res) => {
     
     if (!gameId && !placeId) {
       return res.json({ 
-        playing: false,
-        message: "Game ID not available",
-        presenceData: userPresence
+        playing: true, // They're in a game but we can't get details
+        message: "In game but details unavailable",
+        presenceType: userPresence.userPresenceType,
+        debug: userPresence
       });
     }
     
@@ -335,4 +363,3 @@ app.get("/canjoin/:userId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
-
